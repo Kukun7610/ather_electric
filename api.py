@@ -1,0 +1,368 @@
+"""API Client for Ather Electric."""
+
+from __future__ import annotations
+
+import logging
+import aiohttp
+import json
+import asyncio
+import random
+
+from .const import (
+    BASE_URL,
+    COMMON_HEADERS,
+    GENERATE_OTP_URL,
+    ME_URL,
+    TOKEN_REFRESH_URL,
+    TOKEN_VERIFY_URL,
+    VERIFY_OTP_URL,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+# Default timeout for API calls
+DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+
+class AtherAPIError(Exception):
+    """General API Error."""
+
+
+class AtherAuthError(AtherAPIError):
+    """Authentication Error (401)."""
+
+
+class AtherAPI:
+    """Class to handle Ather API communications."""
+
+    def __init__(
+        self, session: aiohttp.ClientSession, base_url: str = BASE_URL
+    ) -> None:
+        """Initialize the API client."""
+        self._session = session
+        self.base_url = base_url
+
+    async def generate_otp(self, phone_number: str) -> bool:
+        """Generate OTP for the given phone number."""
+        if self._session.closed:
+            return False
+        payload = {"email": "", "contact_no": phone_number, "country_code": "IN"}
+        try:
+            async with self._session.post(
+                GENERATE_OTP_URL,
+                json=payload,
+                headers=COMMON_HEADERS,
+                timeout=DEFAULT_TIMEOUT,
+            ) as resp:
+                if resp.status == 200:
+                    return True
+                _LOGGER.error("Generate OTP failed: %s", await resp.text())
+        except RuntimeError:
+            return False
+        except Exception as e:
+            _LOGGER.error("Error generating OTP: %s", e)
+        return False
+
+    async def verify_otp(self, phone_number: str, otp: str) -> dict | None:
+        """Verify OTP and return response containing tokens."""
+        if self._session.closed:
+            return None
+        payload = {
+            "email": "",
+            "contact_no": phone_number,
+            "userOtp": otp,
+            "is_mobile_login": "true",
+            "country_code": "IN",
+        }
+        try:
+            async with self._session.post(
+                VERIFY_OTP_URL,
+                json=payload,
+                headers=COMMON_HEADERS,
+                timeout=DEFAULT_TIMEOUT,
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                _LOGGER.error("Verify OTP failed: %s", await resp.text())
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error verifying OTP: %s", e)
+        return None
+
+    async def get_id_token(self, custom_token: str, api_key: str) -> str | None:
+        """Exchange Custom Token for ID Token."""
+        if self._session.closed:
+            return None
+        url = f"{TOKEN_VERIFY_URL}?key={api_key}"
+        payload = {"token": custom_token, "returnSecureToken": True}
+        try:
+            async with self._session.post(
+                url, json=payload, headers=COMMON_HEADERS, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("idToken")
+                _LOGGER.error("Token Exchange failed: %s", await resp.text())
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error exchanging token: %s", e)
+        return None
+
+    def get_user_id_from_token(self, token: str) -> str | None:
+        """Decode JWT token to get user_id without API call."""
+        try:
+            # JWT format: header.payload.signature
+            parts = token.split(".")
+            if len(parts) < 2:
+                return None
+
+            # Base64 decode payload (add padding if needed)
+            payload_b64 = parts[1]
+            padding = "=" * (4 - (len(payload_b64) % 4))
+            payload_b64 += padding
+
+            import base64
+
+            payload_bytes = base64.urlsafe_b64decode(payload_b64)
+            payload_str = payload_bytes.decode("utf-8")
+            payload = json.loads(payload_str)
+
+            # Look for user_id or sub
+            return payload.get("user_id") or payload.get("sub")
+        except Exception as e:
+            _LOGGER.error("Error decoding token: %s", e)
+            return None
+
+    async def get_user_profile(self, token: str) -> dict | None:
+        """Fetch User Profile."""
+        if self._session.closed:
+            return None
+        headers = COMMON_HEADERS.copy()
+        headers["Authorization"] = f"Bearer {token}"
+        try:
+            async with self._session.get(
+                ME_URL, headers=headers, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    _LOGGER.debug("Profile Data: %s", data)
+                    return data
+                elif resp.status == 401:
+                    _LOGGER.warning("Get Profile 401 Unauthorized")
+                    raise AtherAuthError("Unauthorized accessing profile")
+                _LOGGER.error("Get Profile failed: %s", await resp.text())
+        except AtherAPIError:
+            raise
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error getting profile: %s", e)
+        return None
+
+    async def get_user_id(self, token: str) -> str | None:
+        """Fetch User ID from Profile (Legacy wrapper)."""
+        # Try local decode first
+        uid = self.get_user_id_from_token(token)
+        if uid:
+            _LOGGER.debug("Decoded User ID from token: %s", uid)
+            return uid
+
+        # Fallback to API
+        profile = await self.get_user_profile(token)
+        if profile:
+            return str(profile.get("id"))
+        return None
+
+    async def get_scooters(
+        self, user_id: str, id_token: str, override_base_url: str | None = None
+    ) -> list[str] | None:
+        """Fetch scooter IDs from Firebase."""
+        if self._session.closed:
+            return None
+        # Use dynamic base_url or override
+        base = override_base_url if override_base_url else self.base_url
+        url = f"{base}/users/{user_id}/scooters.json?auth={id_token}"
+        try:
+            async with self._session.get(url, timeout=DEFAULT_TIMEOUT) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    _LOGGER.debug("Scooters Data: %s", data)
+                    if data:
+                        return list(data.keys())
+                    return []
+                elif resp.status == 401:
+                    raise AtherAuthError(f"Unauthorized accessing scooters at {base}")
+                _LOGGER.error("Get Scooters failed: %s", await resp.text())
+        except AtherAPIError:
+            raise
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error getting scooters: %s", e)
+        return None
+
+    async def get_scooter_details(self, scooter_id: str, id_token: str) -> dict | None:
+        """Fetch details for a specific scooter."""
+        if self._session.closed:
+            return None
+        # Use dynamic base_url
+        url = f"{self.base_url}/scooters/{scooter_id}.json?auth={id_token}"
+        try:
+            async with self._session.get(url, timeout=DEFAULT_TIMEOUT) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                elif resp.status == 401:
+                    raise AtherAuthError(
+                        f"Unauthorized accessing scooter details at {self.base_url}"
+                    )
+                _LOGGER.error(
+                    "Error getting scooter details: Status %s, Response: %s",
+                    resp.status,
+                    await resp.text(),
+                )
+        except AtherAPIError:
+            raise
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error getting scooter details: %s", e)
+        return None
+
+    async def refresh_id_token(self, refresh_token: str, api_key: str) -> dict | None:
+        """Get new ID and Refresh tokens using a refresh token."""
+        if self._session.closed:
+            return None
+        url = f"{TOKEN_REFRESH_URL}?key={api_key}"
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        try:
+            async with self._session.post(
+                url, json=payload, headers=COMMON_HEADERS, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                else:
+                    _LOGGER.warning("Token refresh failed: %s", await resp.text())
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error refreshing token: %s", e)
+        return None
+
+    async def exchange_custom_token(
+        self, firebase_token: str, api_key: str
+    ) -> dict | None:
+        """Exchange custom token for ID and Refresh tokens."""
+        if self._session.closed:
+            return None
+        url = f"{TOKEN_VERIFY_URL}?key={api_key}"
+        payload = {"token": firebase_token, "returnSecureToken": True}
+        try:
+            async with self._session.post(
+                url, json=payload, headers=COMMON_HEADERS, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                else:
+                    _LOGGER.error(
+                        "Custom token exchange failed: %s. The configured token may be expired.",
+                        await resp.text(),
+                    )
+        except RuntimeError:
+            return None
+        except Exception as e:
+            _LOGGER.error("Error exchanging custom token: %s", e)
+        return None
+
+    async def send_put_request(self, path: str, data: dict, id_token: str) -> bool:
+        """Send a PUT request to Firebase."""
+        if self._session.closed:
+            return False
+        # Use dynamic base_url
+        url = f"{self.base_url}/{path}.json?auth={id_token}"
+        try:
+            async with self._session.put(
+                url, json=data, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    _LOGGER.info("PUT request to %s successful", path)
+                    return True
+                elif resp.status == 401:
+                    raise AtherAuthError(f"Unauthorized PUT request to {path}")
+                else:
+                    _LOGGER.error(
+                        "PUT request to %s failed: %s", path, await resp.text()
+                    )
+        except AtherAPIError:
+            raise
+        except RuntimeError:
+            return False
+        except Exception as e:
+            _LOGGER.error("Error sending PUT request: %s", e)
+        return False
+
+    async def fetch_rides(
+        self, scooter_id: str, api_token: str, limit: int = 10
+    ) -> list[dict] | None:
+        """Fetch rides from Ather API with retry logic."""
+
+        if self._session.closed:
+            return None
+
+        # Use the specific endpoint for rides
+        url = f"https://cerberus.ather.io/api/v1/rides?scooterid={scooter_id}&limit={limit}"
+
+        headers = COMMON_HEADERS.copy()
+        headers["Authorization"] = f"Bearer {api_token}"
+
+        retries = 3
+        for attempt in range(retries):
+            try:
+                _LOGGER.debug(
+                    "Fetching rides (attempt %d/%d): limit=%d",
+                    attempt + 1,
+                    retries,
+                    limit,
+                )
+                async with self._session.get(
+                    url, headers=headers, timeout=DEFAULT_TIMEOUT
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        _LOGGER.debug(
+                            "Fetched %d rides successfully",
+                            len(data.get("data", {}).get("trips", [])),
+                        )
+                        return data.get("data", {}).get("trips", [])
+
+                    text = await resp.text()
+                    if resp.status == 401:
+                        _LOGGER.warning("Fetch Rides 401 Unauthorized")
+                        raise AtherAuthError("Unauthorized accessing rides")
+                    elif resp.status == 429:
+                        _LOGGER.warning(
+                            "Fetch Rides Rate Limited. Waiting before retry."
+                        )
+                    else:
+                        _LOGGER.error("Fetch Rides failed: %s - %s", resp.status, text)
+
+                    # Determine if we should retry (5xx or 429)
+                    if resp.status < 500 and resp.status != 429:
+                        return None  # Don't retry client errors (except 429)
+
+            except AtherAuthError:
+                raise
+            except Exception as e:
+                _LOGGER.error("Error fetching rides (attempt %d): %s", attempt + 1, e)
+
+            # Wait before retry if not last attempt
+            if attempt < retries - 1:
+                sleep_time = (2**attempt) + random.uniform(0, 1)
+                _LOGGER.debug("Retrying fetch_rides in %.2f seconds...", sleep_time)
+                await asyncio.sleep(sleep_time)
+
+        return None

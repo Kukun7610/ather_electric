@@ -1,0 +1,14 @@
+{
+  "domain": "ather_electric",
+  "name": "Ather Electric",
+  "codeowners": [
+    "@dfhsingh"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://gitea.dfhsingh.uk/dfhsingh/Ather-Home-Assistant-Component",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://gitea.dfhsingh.uk/dfhsingh/Ather-Home-Assistant-Component/issues",
+  "requirements": [],
+  "version": "2026.01.60"
+}
