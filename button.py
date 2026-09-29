@@ -25,16 +25,10 @@ async def async_setup_entry(
     """Set up the Ather Electric button platform."""
     coordinator: AtherCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
-    entities = []
-    
-    # Ping Feature
-    if coordinator.data.get("atherStackPingMyScooter") == 1:
-        entities.append(AtherPingButton(coordinator))
-        
-    # Remote Shutdown Feature
-    if coordinator.data.get("atherStackRemoteShutdown") == 1:
-        entities.append(AtherRemoteShutdownButton(coordinator))
+    entities = [
+        AtherPingButton(coordinator),
+        AtherRemoteShutdownButton(coordinator),
+    ]
     async_add_entities(entities)
 
 
@@ -56,8 +50,11 @@ class AtherPingButton(AtherButton):
     """Button to ping the scooter."""
 
     _attr_name = "Ping My Scooter"
-    _attr_unique_id = "ping_my_scooter"
     _attr_icon = "mdi:map-marker-radius"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_ping_my_scooter"
 
     async def async_press(self) -> None:
         """Handle the button press."""
@@ -69,8 +66,11 @@ class AtherRemoteShutdownButton(AtherButton):
     """Button to remotely shutdown the scooter."""
 
     _attr_name = "Remote Shutdown"
-    _attr_unique_id = "remote_shutdown"
     _attr_icon = "mdi:power-off"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_remote_shutdown"
 
     async def async_press(self) -> None:
         """Handle the button press."""

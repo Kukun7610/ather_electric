@@ -1,0 +1,4 @@
+force_sync:
+  name: Force Sync
+  description: Force a fresh connection and sync with Ather servers
+  fields: {}

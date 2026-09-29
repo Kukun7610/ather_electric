@@ -26,14 +26,10 @@ async def async_setup_entry(
     """Set up the Ather Electric switch platform."""
     coordinator: AtherCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
-    entities = []
-    
-    # Remote Charging Feature
-    if coordinator.data.get("atherStackRemoteCharging") == 1:
-        entities.append(AtherRemoteChargingSwitch(coordinator))
-        
-    entities.append(AtherShutdownProtectionSwitch(coordinator))
+    entities = [
+        AtherRemoteChargingSwitch(coordinator),
+        AtherShutdownProtectionSwitch(coordinator),
+    ]
     async_add_entities(entities)
 
 
@@ -65,12 +61,7 @@ class AtherRemoteChargingSwitch(AtherSwitch):
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        # Check for chargingHeartBeat as requested by user
-        if not self.coordinator.last_update_success:
-            return False
-
-        charging_data = self.coordinator.get_data("charging", {})
-        return charging_data.get("chargingHeartBeat") == "On"
+        return self.coordinator.last_update_success or bool(self.coordinator.data)
 
     @property
     def is_on(self) -> bool:
@@ -92,9 +83,12 @@ class AtherShutdownProtectionSwitch(AtherSwitch):
     """Switch to toggle Shutdown Safety Mode."""
 
     _attr_name = "Shutdown Protection"
-    _attr_unique_id = "shutdown_protection"
     _attr_icon = "mdi:shield-lock"
     _attr_entity_category = EntityCategory.CONFIG  # Show in configuration section
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_shutdown_protection"
 
     @property
     def is_on(self) -> bool:

@@ -16,6 +16,8 @@ from .const import (
     TOKEN_REFRESH_URL,
     TOKEN_VERIFY_URL,
     VERIFY_OTP_URL,
+    RIDES_URL,
+    HEADERS_BASE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,12 +48,17 @@ class AtherAPI:
         """Generate OTP for the given phone number."""
         if self._session.closed:
             return False
-        payload = {"email": "", "contact_no": phone_number, "country_code": "IN"}
+        payload = {
+            "contact_no": phone_number,
+            "country_code": "IN",
+            "email": "",
+            "notification_medium": {"sms": True, "whatsapp": False},
+        }
         try:
             async with self._session.post(
                 GENERATE_OTP_URL,
                 json=payload,
-                headers=COMMON_HEADERS,
+                headers=HEADERS_BASE,
                 timeout=DEFAULT_TIMEOUT,
             ) as resp:
                 if resp.status == 200:
@@ -68,17 +75,17 @@ class AtherAPI:
         if self._session.closed:
             return None
         payload = {
-            "email": "",
             "contact_no": phone_number,
-            "userOtp": otp,
-            "is_mobile_login": "true",
             "country_code": "IN",
+            "email": "",
+            "userOtp": otp,
+            "is_mobile_login": True,
         }
         try:
             async with self._session.post(
                 VERIFY_OTP_URL,
                 json=payload,
-                headers=COMMON_HEADERS,
+                headers=HEADERS_BASE,
                 timeout=DEFAULT_TIMEOUT,
             ) as resp:
                 if resp.status == 200:
@@ -88,6 +95,45 @@ class AtherAPI:
             return None
         except Exception as e:
             _LOGGER.error("Error verifying OTP: %s", e)
+        return None
+
+    async def get_scooters_v2(self, token: str) -> list[dict] | None:
+        """Fetch scooters list from Cerberus API v2."""
+        if self._session.closed:
+            return None
+        url = f"{self.base_url}/api/v2/auth/user/scooters/firebase-dbs"
+        headers = HEADERS_BASE.copy()
+        headers["Authorization"] = f"Bearer {token}"
+        try:
+            async with self._session.get(
+                url, headers=headers, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("shardDetails", [])
+                _LOGGER.error("Get scooters v2 failed: %s", await resp.text())
+        except Exception as e:
+            _LOGGER.error("Error getting scooters v2: %s", e)
+        return None
+
+    async def get_scooter_properties(self, scooter_uuid: str, token: str) -> dict | None:
+        """Fetch reported properties for a specific scooter."""
+        if self._session.closed:
+            return None
+        url = f"{self.base_url}/api/v1/devices/shadows/scooters/properties"
+        headers = HEADERS_BASE.copy()
+        headers["Authorization"] = f"Bearer {token}"
+        params = {"uuid": scooter_uuid, "state": "reported"}
+        try:
+            async with self._session.get(
+                url, headers=headers, params=params, timeout=DEFAULT_TIMEOUT
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("data", {})
+                _LOGGER.error("Get scooter properties failed: %s", await resp.text())
+        except Exception as e:
+            _LOGGER.error("Error getting scooter properties: %s", e)
         return None
 
     async def get_id_token(self, custom_token: str, api_key: str) -> str | None:
@@ -314,7 +360,7 @@ class AtherAPI:
             return None
 
         # Use the specific endpoint for rides
-        url = f"https://cerberus.ather.io/api/v1/rides?scooterid={scooter_id}&limit={limit}"
+        url = f"{RIDES_URL}?scooterid={scooter_id}&limit={limit}"
 
         headers = COMMON_HEADERS.copy()
         headers["Authorization"] = f"Bearer {api_token}"

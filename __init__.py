@@ -9,8 +9,8 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import config_validation as cv, entity
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -20,6 +20,8 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     CONF_BASE_URL,
+    CONF_ATHER_TOKEN,
+    CONF_SCOOTER_UUID,
 )
 from .coordinator import AtherCoordinator
 
@@ -49,7 +51,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     # Ensure API Key is present for import if missing
     if CONF_FIREBASE_API_KEY not in conf:
-        conf[CONF_FIREBASE_API_KEY] = FIREBASE_API_KEY
+        _LOGGER.error("YAML configuration is missing required 'firebase_api_key'")
+        return False
 
     hass.async_create_task(
         hass.config_entries.flow.async_init(
@@ -71,10 +74,11 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: config_entries.ConfigEntry
 ) -> bool:
     """Set up Ather Electric from a config entry."""
-    scooter_id = entry.data[CONF_SCOOTER_ID]
-    firebase_token = entry.data[CONF_FIREBASE_TOKEN]
-    api_token = entry.data.get("api_token")
-    api_key = entry.data[CONF_FIREBASE_API_KEY]
+    scooter_id = entry.data.get(CONF_SCOOTER_ID)
+    scooter_uuid = entry.data.get(CONF_SCOOTER_UUID)
+    firebase_token = entry.data.get(CONF_FIREBASE_TOKEN, "")
+    api_token = entry.data.get("api_token") or entry.data.get(CONF_ATHER_TOKEN)
+    api_key = entry.data.get(CONF_FIREBASE_API_KEY, "")
     device_name = entry.data.get(CONF_NAME, "Ather Scooter")
     base_url = entry.data.get(CONF_BASE_URL)
 
@@ -120,6 +124,7 @@ async def async_setup_entry(
         integration_version,
         base_url=base_url,
         ride_manager=ride_manager,  # Pass manager
+        config_entry=entry,
     )
 
     # Start the coordinator (WebSocket connection)
@@ -139,6 +144,25 @@ async def async_setup_entry(
         _LOGGER.error("Error waiting for initial data: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Register force sync service
+    async def force_sync_service(call: ServiceCall) -> None:
+        """Force sync with Ather servers."""
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        success = await coordinator.force_sync()
+        
+        if success:
+            _LOGGER.info("Force sync service completed successfully")
+        else:
+            _LOGGER.warning("Force sync service completed with issues")
+    
+    # Register service with proper schema
+    hass.services.async_register(
+        DOMAIN, 
+        "force_sync", 
+        force_sync_service,
+        schema=vol.Schema({})
+    )
 
     # Apply initial options
     if entry.options:

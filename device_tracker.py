@@ -82,10 +82,7 @@ class AtherTracker(TrackerEntity):
         """Return the gps accuracy of the device."""
         return self.coordinator.get_data("gps_accuracy")
 
-    @property
-    def battery_level(self) -> int | None:
-        """Return the battery level of the device."""
-        return self.coordinator.get_data("batterySOC")
+
 
     @property
     def extra_state_attributes(self) -> dict[str, any]:

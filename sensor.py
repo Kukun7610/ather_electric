@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -41,110 +42,40 @@ async def async_setup_entry(
         AtherOdoSensor(coordinator),
         AtherVinSensor(coordinator),
         AtherBikeTypeSensor(coordinator),
-        AtherOtaStatusSensor(coordinator),
         AtherLastSyncedSensor(coordinator),
-        AtherModeRangeSensor(coordinator, "Eco", "EcoModeRange"),
-        AtherModeRangeSensor(coordinator, "Ride", "RideModeRange"),
-        AtherModeRangeSensor(coordinator, "Sport", "SportModeRange"),
-        AtherModeRangeSensor(coordinator, "Warp", "WarpModeRange"),
-        AtherModeRangeSensor(coordinator, "SmartEco", "SmartEcoModeRange"),
-        AtherModeRangeSensor(coordinator, "WarpPlus", "WarpPlusModeRange"),
         AtherVehicleStateSensor(coordinator),
         AtherChargerTypeSensor(coordinator),
         AtherSoftwareVersionSensor(coordinator),
-        AtherSavingsSensor(coordinator),
-        # Projected Ranges (Stats)
-        AtherProjectedRangeSensor(coordinator, "Eco", "ecoModePredictedRange_kms"),
-        AtherProjectedRangeSensor(coordinator, "Ride", "rideModePredictedRange_kms"),
-        AtherProjectedRangeSensor(coordinator, "Sport", "sportModePredictedRange_kms"),
-        AtherProjectedRangeSensor(coordinator, "Warp", "warpModePredictedRange_kms"),
-        AtherProjectedRangeSensor(
-            coordinator, "WarpPlus", "warpPlusModePredictedRange_kms"
-        ),
-        AtherProjectedRangeSensor(
-            coordinator, "SmartEco", "smartEcoModePredictedRange_kms"
-        ),
-        AtherAltitudeSensor(coordinator),
-        AtherTheftMovementSensor(coordinator),
-        AtherSmartChargingSensor(coordinator),
-        # New Sensors
-        AtherTripDistanceSensor(coordinator, "A"),
-        AtherTripDistanceSensor(coordinator, "B"),
-        AtherTripEfficiencySensor(coordinator, "A"),
-        AtherTripEfficiencySensor(coordinator, "B"),
-        AtherTripAvgSpeedSensor(coordinator, "A"),
-        AtherTripAvgSpeedSensor(coordinator, "B"),
-        AtherSubscriptionStatusSensor(coordinator),
-        AtherTimeRemainingSensor(coordinator, "full", "Time to Full Charge"),
-        AtherTimeRemainingSensor(coordinator, "80", "Time to 80% Charge"),
-        AtherServiceSensor(coordinator),
-        AtherWarrantySensor(
-            coordinator, "battery", "status", "Battery Warranty Status"
-        ),
-        AtherWarrantySensor(
-            coordinator,
-            "battery",
-            "last_purchase_date",
-            "Battery Warranty Date",
-            SensorDeviceClass.TIMESTAMP,
-        ),
-        AtherWarrantySensor(
-            coordinator, "vehicle", "status", "Vehicle Warranty Status"
-        ),
-        AtherWarrantySensor(
-            coordinator,
-            "vehicle",
-            "last_purchase_date",
-            "Vehicle Warranty Date",
-            SensorDeviceClass.TIMESTAMP,
-        ),
+        # Projected Ranges (dynamically calculated)
+        AtherProjectedRangeSensor(coordinator, "Eco", "ecoProjectedRange"),
+        AtherProjectedRangeSensor(coordinator, "Ride", "rideProjectedRange"),
+        AtherProjectedRangeSensor(coordinator, "Sport", "sportProjectedRange"),
+        AtherProjectedRangeSensor(coordinator, "Warp", "warpProjectedRange"),
+        AtherProjectedRangeSensor(coordinator, "SmartEco", "smartEcoProjectedRange"),
         # Current Trip Sensors
         AtherCurrentTripDistanceSensor(coordinator),
         AtherCurrentTripDurationSensor(coordinator),
         AtherCurrentTripSpeedSensor(coordinator),
-        # Navigation & Subscription
-        AtherSubscriptionExpirySensor(coordinator),
-        AtherChargingCreditsSensor(coordinator),
-        # Hardware Diagnostics
-        AtherDiagnosticSensor(coordinator, "Motor Type", "motor_type", "mdi:engine"),
-        AtherDiagnosticSensor(
-            coordinator, "Controller Type", "controller_type", "mdi:cpu-64-bit"
-        ),
-        AtherDiagnosticSensor(
-            coordinator, "Generation", "generation", "mdi:identifier"
-        ),
-        AtherDiagnosticSensor(coordinator, "City", "city", "mdi:city"),
-        AtherRemoteShutdownSensor(coordinator),
+        AtherCurrentTripStartTimeSensor(coordinator),
+        AtherCurrentTripStartSOCSensor(coordinator),
+        AtherTripCountSensor(coordinator),
+        AtherTripEfficiencyTrendSensor(coordinator),
         # TPMS Sensors
         AtherTpmsPressureSensor(coordinator, "front"),
         AtherTpmsPressureSensor(coordinator, "rear"),
         AtherTpmsBatterySensor(coordinator, "front"),
         AtherTpmsBatterySensor(coordinator, "rear"),
+        # Ather TrueHealth™ Diagnostics & Health Suite
+        AtherTrueHealthScoreSensor(coordinator),
+        AtherTrueHealthRatingSensor(coordinator),
+        AtherBatterySoHSensor(coordinator),
+        AtherBatteryWarrantySensor(coordinator),
+        AtherMotorHealthSensor(coordinator),
+        AtherBrakePadHealthSensor(coordinator),
+        AtherDriveBeltHealthSensor(coordinator),
+        AtherTyreHealthSensor(coordinator),
+        AtherResaleValuationSensor(coordinator),
     ]
-
-    # Dynamic Non-Binary Feature Flags Discovery
-    features = coordinator.get_data("features", {})
-    if features:
-        for feature_key, value in features.items():
-            if feature_key.startswith("app_"):
-                continue
-
-            # Check if it looks like a NON-binary flag (values like 79, 110, etc.)
-            if not is_binary_value(value):
-                # Generate a readable name
-                readable_name = (
-                    feature_key.replace("_", " ")
-                    .replace("app", "App")
-                    .replace("vehicle", "Vehicle")
-                    .replace("atherStack", "Ather Stack")
-                )
-                readable_name = " ".join(
-                    word.capitalize() for word in readable_name.split()
-                )
-
-                entities.append(
-                    AtherFeatureSensor(coordinator, feature_key, readable_name)
-                )
 
     async_add_entities(entities)
 
@@ -396,87 +327,7 @@ class AtherAltitudeSensor(AtherSensor):
         return None
 
 
-class AtherTripDistanceSensor(AtherSensor):
-    """Representation of Trip Distance."""
 
-    _attr_device_class = SensorDeviceClass.DISTANCE
-    _attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
-
-    def __init__(self, coordinator, trip_id: str) -> None:
-        """Initialize."""
-        super().__init__(coordinator)
-        self.trip_id = trip_id
-        self._attr_name = f"Trip {trip_id} Distance"
-
-    @property
-    def unique_id(self) -> str:
-        return f"ather_{self.coordinator.scooter_id}_trip_{self.trip_id}_distance"
-
-    @property
-    def native_value(self) -> float | None:
-        key = f"trip{self.trip_id}"
-        data = self.coordinator.get_data(key, {})
-        return data.get("distance")
-
-
-class AtherTripEfficiencySensor(AtherSensor):
-    """Representation of Trip Efficiency."""
-
-    _attr_name = "Trip Efficiency"
-    _attr_native_unit_of_measurement = "km/kWh"
-    _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(self, coordinator, trip_id: str) -> None:
-        """Initialize."""
-        super().__init__(coordinator)
-        self.trip_id = trip_id
-        self._attr_name = f"Trip {trip_id} Efficiency"
-
-    @property
-    def unique_id(self) -> str:
-        return f"ather_{self.coordinator.scooter_id}_trip_{self.trip_id}_efficiency"
-
-    @property
-    def native_value(self) -> float | None:
-        key = f"trip{self.trip_id}"
-        data = self.coordinator.get_data(key, {})
-        val = data.get("efficiency")
-        if val:
-            try:
-                wh_km = float(val)
-                if wh_km > 0:
-                    # Convert Wh/km to km/kWh
-                    # 1 kWh = 1000 Wh
-                    # km/kWh = 1000 / (Wh/km)
-                    return round(1000 / wh_km, 2)
-            except (ValueError, TypeError):
-                pass
-        return None
-
-
-class AtherTripAvgSpeedSensor(AtherSensor):
-    """Representation of Trip Average Speed."""
-
-    _attr_device_class = SensorDeviceClass.SPEED
-    _attr_native_unit_of_measurement = UnitOfSpeed.KILOMETERS_PER_HOUR
-    _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(self, coordinator, trip_id: str) -> None:
-        """Initialize."""
-        super().__init__(coordinator)
-        self.trip_id = trip_id
-        self._attr_name = f"Trip {trip_id} Avg Speed"
-
-    @property
-    def unique_id(self) -> str:
-        return f"ather_{self.coordinator.scooter_id}_trip_{self.trip_id}_avg_speed"
-
-    @property
-    def native_value(self) -> float | None:
-        key = f"trip{self.trip_id}"
-        data = self.coordinator.get_data(key, {})
-        return data.get("avgSpeed")
 
 
 class AtherSubscriptionStatusSensor(AtherSensor):
@@ -828,7 +679,14 @@ class AtherTpmsPressureSensor(AtherSensor):
         tpms = self.coordinator.get_data("tpms", {})
         val = tpms.get(self._key)
         if val is not None:
-            return float(val)
+            try:
+                val_float = float(val)
+                # If value is high (e.g. > 100), convert kPa to PSI (1 kPa = 0.1450377377 PSI)
+                if val_float > 100:
+                    return round(val_float * 0.1450377377, 1)
+                return round(val_float, 1)
+            except (ValueError, TypeError):
+                pass
         return None
 
     @property
@@ -875,8 +733,21 @@ class AtherCurrentTripSensor(AtherSensor):
 
     @property
     def current_trip_data(self) -> dict:
-        """Return current trip data."""
-        return self.coordinator.get_data("current_trip", {})
+        """Return current trip data from the actual API structure."""
+        # The API provides trip data directly at root level with keys: activeTrip, averageSpeed, distance, time, tripA, tripB, timestamp
+        trip_data = {}
+        
+        # Get all trip-related keys from coordinator data
+        trip_keys = ["activeTrip", "averageSpeed", "distance", "time", "tripA", "tripB", "timestamp"]
+        for key in trip_keys:
+            if key in self.coordinator.data:
+                trip_data[key] = self.coordinator.data[key]
+        
+        # Debug logging
+        if not trip_data:
+            _LOGGER.debug("Current Trip Data - No trip data found. Available data keys: %s", list(self.coordinator.data.keys()))
+        
+        return trip_data
 
     @property
     def extra_state_attributes(self) -> dict[str, any]:
@@ -939,6 +810,136 @@ class AtherCurrentTripSpeedSensor(AtherCurrentTripSensor):
     @property
     def native_value(self) -> float | None:
         return self.current_trip_data.get("averageSpeed")
+
+
+class AtherCurrentTripStartTimeSensor(AtherCurrentTripSensor):
+    """Representation of Current Trip Start Time."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_name = "Current Trip Start Time"
+    _attr_icon = "mdi:timer-play"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_current_trip_start_time"
+
+    @property
+    def native_value(self):
+        """Return trip timestamp as start time."""
+        trip_data = self.current_trip_data
+        timestamp = trip_data.get("timestamp")
+        
+        # Debug logging
+        if not timestamp and trip_data:
+            _LOGGER.debug("Trip Start Time - Available keys: %s, looking for: timestamp", list(trip_data.keys()))
+        
+        # Also check coordinator's tracked start time
+        coordinator_start_time = getattr(self.coordinator, '_trip_start_time', None)
+        if coordinator_start_time:
+            _LOGGER.debug("Trip Start Time - Coordinator start time: %s", coordinator_start_time)
+        
+        # Use coordinator's start time if API timestamp is not available
+        if not timestamp and coordinator_start_time:
+            timestamp = coordinator_start_time
+        
+        if timestamp and str(timestamp).isdigit():
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(int(timestamp) / 1000, tz=timezone.utc)
+        return None
+
+
+class AtherCurrentTripStartSOCSensor(AtherCurrentTripSensor):
+    """Representation of Current Trip Start SOC."""
+
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_name = "Current Trip Start SOC"
+    _attr_icon = "mdi:battery-50"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_current_trip_start_soc"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return trip start SOC from coordinator tracking."""
+        # Start SOC is tracked in coordinator during trip start detection
+        start_soc = getattr(self.coordinator, '_current_trip_start_soc', None)
+        
+        # Debug logging
+        _LOGGER.debug("Trip Start SOC - Coordinator tracked start SOC: %s", start_soc)
+        
+        if start_soc is not None:
+            try:
+                # Handle both integer and float SOC values
+                if isinstance(start_soc, (int, float)):
+                    return int(round(float(start_soc)))
+                elif isinstance(start_soc, str):
+                    return int(round(float(start_soc)))
+                else:
+                    _LOGGER.warning("Unexpected SOC type: %s", type(start_soc))
+                    return None
+            except (ValueError, TypeError) as e:
+                _LOGGER.error("Error converting SOC to int: %s, value: %s", e, start_soc)
+                return None
+        return None
+
+
+class AtherTripCountSensor(AtherSensor):
+    """Representation of Total Trip Count."""
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_name = "Total Trip Count"
+    _attr_icon = "mdi:counter"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_trip_count"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return total trip count from coordinator."""
+        trip_count = getattr(self.coordinator, 'trip_count', None)
+        
+        # Debug logging
+        _LOGGER.debug("Trip Count - Value: %s", trip_count)
+        
+        return trip_count
+
+
+class AtherTripEfficiencyTrendSensor(AtherSensor):
+    """Representation of Trip Efficiency Trend."""
+
+    _attr_native_unit_of_measurement = "km/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_name = "Trip Efficiency Trend"
+    _attr_icon = "mdi:trending-up"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_trip_efficiency_trend"
+
+    @property
+    def native_value(self) -> float | None:
+        """Return efficiency trend from coordinator."""
+        efficiency_trend = getattr(self.coordinator, 'efficiency_trend', None)
+        
+        # Debug logging
+        _LOGGER.debug("Efficiency Trend - Value: %s", efficiency_trend)
+        
+        return efficiency_trend
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        """Return additional efficiency trend attributes."""
+        attrs = super().extra_state_attributes
+        attrs.update({
+            "last_5_trips_avg": getattr(self.coordinator, 'last_5_trips_efficiency', None),
+            "last_10_trips_avg": getattr(self.coordinator, 'last_10_trips_efficiency', None),
+            "trend_direction": getattr(self.coordinator, 'efficiency_trend_direction', None),
+        })
+        return attrs
 
 
 class AtherSubscriptionExpirySensor(AtherSensor):
@@ -1035,3 +1036,291 @@ class AtherFeatureSensor(AtherSensor):
         """Return the state of the sensor."""
         features = self.coordinator.get_data("features", {})
         return features.get(self.feature_key)
+
+
+# =====================================================================
+# Ather TrueHealth™ Diagnostics & Vehicle Health Sensors Suite
+# =====================================================================
+
+class AtherTrueHealthScoreSensor(AtherSensor):
+    """Overall Ather TrueHealth™ composite score."""
+
+    _attr_name = "TrueHealth Score"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:heart-pulse"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_truehealth_score"
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.get_data("true_health", {}).get("overall_score")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        th = self.coordinator.get_data("true_health", {})
+        return {
+            "rating": th.get("rating"),
+            "certified_by": th.get("resale", {}).get("certified_by"),
+        }
+
+
+class AtherTrueHealthRatingSensor(AtherSensor):
+    """Ather TrueHealth™ evaluation rating badge."""
+
+    _attr_name = "TrueHealth Rating"
+    _attr_icon = "mdi:shield-check"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_truehealth_rating"
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.get_data("true_health", {}).get("rating")
+
+
+class AtherBatterySoHSensor(AtherSensor):
+    """Ather Battery State of Health (SoH %) sensor."""
+
+    _attr_name = "Battery State of Health"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-heart-variant"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_battery_soh"
+
+    @property
+    def native_value(self) -> int | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("battery", {})
+            .get("soh")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        bat = (
+            self.coordinator.get_data("true_health", {})
+            .get("battery", {})
+        )
+        return {
+            "thermal_status": bat.get("thermal_status"),
+            "temp_c": bat.get("temp_c"),
+            "charge_cycle_count": bat.get("cycle_count"),
+            "degradation_percent": bat.get("degradation_pct"),
+            "cell_balance_status": bat.get("cell_balance"),
+            "health_status": bat.get("status"),
+        }
+
+
+class AtherBatteryWarrantySensor(AtherSensor):
+    """Ather Eight70™ Battery Warranty coverage and guarantee status."""
+
+    _attr_name = "Eight70 Battery Warranty"
+    _attr_icon = "mdi:certificate"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_eight70_warranty"
+
+    @property
+    def native_value(self) -> str | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("warranty", {})
+            .get("status")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        war = (
+            self.coordinator.get_data("true_health", {})
+            .get("warranty", {})
+        )
+        return {
+            "guarantee_soh_percent": war.get("guarantee_soh"),
+            "remaining_warranty_km": war.get("remaining_km"),
+            "max_coverage_km": war.get("max_km"),
+            "max_period_years": war.get("max_years"),
+            "is_covered": war.get("is_covered"),
+            "program_description": war.get("description"),
+        }
+
+
+class AtherMotorHealthSensor(AtherSensor):
+    """Ather Electric Motor & MCU powertrain health score."""
+
+    _attr_name = "Motor Health"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:engine"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_motor_health"
+
+    @property
+    def native_value(self) -> int | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("motor", {})
+            .get("score")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        motor = (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("motor", {})
+        )
+        return {
+            "status": motor.get("status"),
+            "detail": motor.get("detail"),
+        }
+
+
+class AtherBrakePadHealthSensor(AtherSensor):
+    """Ather Brake Pads & Disc wear status score."""
+
+    _attr_name = "Brake Pad Health"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:car-brake-alert"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_brake_pad_health"
+
+    @property
+    def native_value(self) -> int | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("brake_pads", {})
+            .get("score")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        pads = (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("brake_pads", {})
+        )
+        return {
+            "status": pads.get("status"),
+            "detail": pads.get("detail"),
+        }
+
+
+class AtherDriveBeltHealthSensor(AtherSensor):
+    """Gates Carbon Drive Belt tension and wear score."""
+
+    _attr_name = "Drive Belt Health"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:cog-transfer"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_drive_belt_health"
+
+    @property
+    def native_value(self) -> int | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("drive_belt", {})
+            .get("score")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        belt = (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("drive_belt", {})
+        )
+        return {
+            "status": belt.get("status"),
+            "detail": belt.get("detail"),
+        }
+
+
+class AtherTyreHealthSensor(AtherSensor):
+    """Ather Tyres & TPMS health status score."""
+
+    _attr_name = "Tyres Health"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:tire"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_tyres_health"
+
+    @property
+    def native_value(self) -> int | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("tyres", {})
+            .get("score")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        tyres = (
+            self.coordinator.get_data("true_health", {})
+            .get("subsystems", {})
+            .get("tyres", {})
+        )
+        return {
+            "status": tyres.get("status"),
+            "detail": tyres.get("detail"),
+        }
+
+
+class AtherResaleValuationSensor(AtherSensor):
+    """Ather TrueHealth™ dynamic certified resale estimate."""
+
+    _attr_name = "Estimated Resale Valuation"
+    _attr_native_unit_of_measurement = "INR"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:currency-inr"
+
+    @property
+    def unique_id(self) -> str:
+        return f"ather_{self.coordinator.scooter_id}_resale_valuation"
+
+    @property
+    def native_value(self) -> int | None:
+        return (
+            self.coordinator.get_data("true_health", {})
+            .get("resale", {})
+            .get("estimated_value_inr")
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, any]:
+        resale = (
+            self.coordinator.get_data("true_health", {})
+            .get("resale", {})
+        )
+        return {
+            "health_bonus_inr": resale.get("health_bonus_inr"),
+            "certified_by": resale.get("certified_by"),
+        }
+
+
+
+
