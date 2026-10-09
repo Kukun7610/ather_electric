@@ -1,7 +1,7 @@
 # Ather Electric - Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/default)
-[![GitHub Release](https://img.shields.io/github/v/release/Tilak-Sidduram/ather_electric?style=for-the-badge&color=blue)](https://github.com/Tilak-Sidduram/ather_electric)
+[![GitHub Release](https://img.shields.io/github/v/release/tilaksidduram/ather_electric?style=for-the-badge&color=blue)](https://github.com/tilaksidduram/ather_electric)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Home Assistant](https://img.shields.io/badge/Home_Assistant-2024.1%2B-blueviolet.svg?style=for-the-badge)](https://www.home-assistant.io/)
 
@@ -78,7 +78,7 @@ Connects directly via Ather's native **Cerberus Cloud & WebSocket API** to provi
 ### Method 2: Manual Installation
 
 1. Download the latest release from the [Releases](https://github.com/tilaksidduram/ather_electric) page.
-2. Extract the archive and copy the `ather_electric` folder into your Home Assistant directory under:
+2. Extract the archive and copy the `custom_components/ather_electric` folder into your Home Assistant directory under:
    ```text
    config/custom_components/ather_electric/
    ```
@@ -146,6 +146,28 @@ Connects directly via Ather's native **Cerberus Cloud & WebSocket API** to provi
 
 ---
 
+## Dashboard Card Setup (Tip)
+
+You can easily add a dedicated **Ather TrueHealth™** card to your Home Assistant Lovelace dashboard.
+
+```yaml
+type: entities
+title: Ather TrueHealth™
+show_header_toggle: false
+entities:
+  - entity: sensor.ather_<id>_truehealth_score
+  - entity: sensor.ather_<id>_truehealth_rating
+  - entity: sensor.ather_<id>_battery_soh
+  - entity: sensor.ather_<id>_eight70_warranty
+  - entity: sensor.ather_<id>_motor_health
+  - entity: sensor.ather_<id>_brake_pad_health
+  - entity: sensor.ather_<id>_drive_belt_health
+  - entity: sensor.ather_<id>_tyres_health
+  - entity: sensor.ather_<id>_resale_valuation
+```
+
+---
+
 ## Example Automations
 
 ### 1. Low Tire Pressure Notification
@@ -161,7 +183,7 @@ trigger:
 action:
   - service: notify.notify
     data:
-      title: "⚠️ Ather Scooter Tire Pressure Alert"
+      title: "🛞 Ather Scooter Tire Pressure Alert"
       message: >
         Tire pressure warning! Front: {{ states('sensor.ather_scooter_front_tyre_pressure') }} PSI,
         Rear: {{ states('sensor.ather_scooter_rear_tyre_pressure') }} PSI.

@@ -1042,7 +1042,16 @@ class AtherFeatureSensor(AtherSensor):
 # Ather TrueHealth™ Diagnostics & Vehicle Health Sensors Suite
 # =====================================================================
 
-class AtherTrueHealthScoreSensor(AtherSensor):
+class AtherTrueHealthSensor(AtherSensor):
+    """Base class for Ather TrueHealth™ diagnostic sensors placed under the main scooter device."""
+
+    def __init__(self, coordinator) -> None:
+        """Initialize the TrueHealth entity."""
+        super().__init__(coordinator)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+
+class AtherTrueHealthScoreSensor(AtherTrueHealthSensor):
     """Overall Ather TrueHealth™ composite score."""
 
     _attr_name = "TrueHealth Score"
@@ -1067,7 +1076,7 @@ class AtherTrueHealthScoreSensor(AtherSensor):
         }
 
 
-class AtherTrueHealthRatingSensor(AtherSensor):
+class AtherTrueHealthRatingSensor(AtherTrueHealthSensor):
     """Ather TrueHealth™ evaluation rating badge."""
 
     _attr_name = "TrueHealth Rating"
@@ -1082,7 +1091,7 @@ class AtherTrueHealthRatingSensor(AtherSensor):
         return self.coordinator.get_data("true_health", {}).get("rating")
 
 
-class AtherBatterySoHSensor(AtherSensor):
+class AtherBatterySoHSensor(AtherTrueHealthSensor):
     """Ather Battery State of Health (SoH %) sensor."""
 
     _attr_name = "Battery State of Health"
@@ -1119,7 +1128,7 @@ class AtherBatterySoHSensor(AtherSensor):
         }
 
 
-class AtherBatteryWarrantySensor(AtherSensor):
+class AtherBatteryWarrantySensor(AtherTrueHealthSensor):
     """Ather Eight70™ Battery Warranty coverage and guarantee status."""
 
     _attr_name = "Eight70 Battery Warranty"
@@ -1153,7 +1162,7 @@ class AtherBatteryWarrantySensor(AtherSensor):
         }
 
 
-class AtherMotorHealthSensor(AtherSensor):
+class AtherMotorHealthSensor(AtherTrueHealthSensor):
     """Ather Electric Motor & MCU powertrain health score."""
 
     _attr_name = "Motor Health"
@@ -1187,7 +1196,7 @@ class AtherMotorHealthSensor(AtherSensor):
         }
 
 
-class AtherBrakePadHealthSensor(AtherSensor):
+class AtherBrakePadHealthSensor(AtherTrueHealthSensor):
     """Ather Brake Pads & Disc wear status score."""
 
     _attr_name = "Brake Pad Health"
@@ -1221,7 +1230,7 @@ class AtherBrakePadHealthSensor(AtherSensor):
         }
 
 
-class AtherDriveBeltHealthSensor(AtherSensor):
+class AtherDriveBeltHealthSensor(AtherTrueHealthSensor):
     """Gates Carbon Drive Belt tension and wear score."""
 
     _attr_name = "Drive Belt Health"
@@ -1255,7 +1264,7 @@ class AtherDriveBeltHealthSensor(AtherSensor):
         }
 
 
-class AtherTyreHealthSensor(AtherSensor):
+class AtherTyreHealthSensor(AtherTrueHealthSensor):
     """Ather Tyres & TPMS health status score."""
 
     _attr_name = "Tyres Health"
@@ -1289,7 +1298,7 @@ class AtherTyreHealthSensor(AtherSensor):
         }
 
 
-class AtherResaleValuationSensor(AtherSensor):
+class AtherResaleValuationSensor(AtherTrueHealthSensor):
     """Ather TrueHealth™ dynamic certified resale estimate."""
 
     _attr_name = "Estimated Resale Valuation"
