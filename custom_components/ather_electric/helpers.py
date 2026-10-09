@@ -2,6 +2,23 @@
 
 from __future__ import annotations
 
+from typing import Any, Mapping
+
+
+def normalize_api_token(data: Mapping[str, Any] | None) -> str | None:
+    """Return the canonical Ather API token from legacy and current config keys."""
+    if not data:
+        return None
+
+    for key in ("ather_token", "api_token", "token"):
+        value = data.get(key)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+
+    return None
+
 
 def safe_bool(value) -> bool:
     """Safely convert to bool."""

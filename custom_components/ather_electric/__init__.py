@@ -24,6 +24,7 @@ from .const import (
     CONF_SCOOTER_UUID,
 )
 from .coordinator import AtherCoordinator
+from .helpers import normalize_api_token
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+async def async_migrate_entry(
+    hass: HomeAssistant, config_entry: config_entries.ConfigEntry
+) -> bool:
+    """Normalize legacy token keys during upgrade."""
+    data = dict(config_entry.data)
+    token = normalize_api_token(data)
+    if token:
+        data[CONF_ATHER_TOKEN] = token
+        data["api_token"] = token
+
+    if data != config_entry.data or config_entry.version < 2:
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data=data,
+            version=2,
+        )
+
+    return True
+
+
 from homeassistant.loader import async_get_integration
 
 # ... existing imports ...
@@ -77,7 +98,7 @@ async def async_setup_entry(
     scooter_id = entry.data.get(CONF_SCOOTER_ID)
     scooter_uuid = entry.data.get(CONF_SCOOTER_UUID)
     firebase_token = entry.data.get(CONF_FIREBASE_TOKEN, "")
-    api_token = entry.data.get("api_token") or entry.data.get(CONF_ATHER_TOKEN)
+    api_token = normalize_api_token(entry.data) or ""
     api_key = entry.data.get(CONF_FIREBASE_API_KEY, "")
     device_name = entry.data.get(CONF_NAME, "Ather Scooter")
     base_url = entry.data.get(CONF_BASE_URL)
@@ -150,19 +171,20 @@ async def async_setup_entry(
         """Force sync with Ather servers."""
         coordinator = hass.data[DOMAIN][entry.entry_id]
         success = await coordinator.force_sync()
-        
+
         if success:
             _LOGGER.info("Force sync service completed successfully")
         else:
             _LOGGER.warning("Force sync service completed with issues")
-    
-    # Register service with proper schema
-    hass.services.async_register(
-        DOMAIN, 
-        "force_sync", 
-        force_sync_service,
-        schema=vol.Schema({})
-    )
+
+    # Register service with proper schema once per domain.
+    if not hass.services.has_service(DOMAIN, "force_sync"):
+        hass.services.async_register(
+            DOMAIN,
+            "force_sync",
+            force_sync_service,
+            schema=vol.Schema({}),
+        )
 
     # Apply initial options
     if entry.options:
@@ -184,11 +206,13 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: config_entries.ConfigEntry
 ) -> bool:
     """Unload a config entry."""
-    coordinator = hass.data[DOMAIN].get(entry.entry_id)
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if coordinator:
         await coordinator.close()
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
+        if not hass.config_entries.async_entries(DOMAIN):
+            hass.services.async_remove(DOMAIN, "force_sync")
 
     return unload_ok

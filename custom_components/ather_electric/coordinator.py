@@ -93,7 +93,9 @@ class AtherCoordinator:
         # Config Options
         self.enable_raw_logging = False  # Will be updated from entry options
         self._runner_task: Optional[asyncio.Task] = None
+        self._health_monitor_task_handle: Optional[asyncio.Task] = None
         self._remove_stop_listener = None
+        self._daily_sync_unsub = None
 
         # Rate Limiting & Backoff
         self._last_remote_command_time = 0
@@ -127,11 +129,14 @@ class AtherCoordinator:
 
     def start(self) -> None:
         """Start the coordinator background task."""
-        if not self._runner_task:
-            self._runner_task = self.hass.loop.create_task(self.connect())
+        if not self._runner_task or self._runner_task.done():
+            self._runner_task = self.hass.async_create_task(self.connect())
 
-        # Start health monitoring task
-        self.hass.loop.create_task(self._health_monitor_task())
+        # Start health monitoring task once per coordinator lifecycle.
+        if not self._health_monitor_task_handle or self._health_monitor_task_handle.done():
+            self._health_monitor_task_handle = self.hass.async_create_task(
+                self._health_monitor_task()
+            )
 
         # Initialize force sync time
         self._last_force_sync_time = time.time()
@@ -186,6 +191,18 @@ class AtherCoordinator:
             except asyncio.CancelledError:
                 pass
         self._runner_task = None
+
+        if self._health_monitor_task_handle and not self._health_monitor_task_handle.done():
+            self._health_monitor_task_handle.cancel()
+            try:
+                await self._health_monitor_task_handle
+            except asyncio.CancelledError:
+                pass
+        self._health_monitor_task_handle = None
+
+        if self._daily_sync_unsub is not None:
+            self._daily_sync_unsub()
+            self._daily_sync_unsub = None
 
         if self._remove_stop_listener:
             self._remove_stop_listener()
@@ -381,6 +398,88 @@ class AtherCoordinator:
             return id_token
         return None
 
+    async def _ensure_scooter_identity(self) -> None:
+        """Resolve scooter UUID/ID pairs from Ather’s API when config data is incomplete."""
+        if not self.scooter_uuid:
+            try:
+                _LOGGER.info("Attempting to dynamically resolve scooter UUID...")
+                scooters = await self.api.get_scooters_v2(self.api_token)
+                if scooters:
+                    matched = None
+                    for s in scooters:
+                        if s.get("scooter") == self.scooter_id:
+                            matched = s
+                            break
+                    if not matched:
+                        matched = scooters[0]
+                    self.scooter_uuid = matched.get("scooter_uuid")
+                    _LOGGER.info("Dynamically resolved scooter_uuid: %s", self.scooter_uuid)
+
+                    if self.config_entry:
+                        self.hass.config_entries.async_update_entry(
+                            self.config_entry,
+                            data={
+                                **self.config_entry.data,
+                                CONF_SCOOTER_UUID: self.scooter_uuid,
+                            },
+                        )
+                else:
+                    self.scooter_uuid = self.scooter_id
+                    _LOGGER.warning(
+                        "Could not fetch scooters list, falling back to scooter_id: %s",
+                        self.scooter_uuid,
+                    )
+            except Exception as e:
+                self.scooter_uuid = self.scooter_id
+                _LOGGER.error(
+                    "Error fetching scooter UUID: %s. Falling back to scooter_id: %s",
+                    e,
+                    self.scooter_uuid,
+                )
+
+        is_uuid = self.scooter_id and (
+            len(str(self.scooter_id)) > 15 or "-" in str(self.scooter_id)
+        )
+        if not self.scooter_id or is_uuid or self.scooter_id == self.scooter_uuid:
+            try:
+                _LOGGER.info("Attempting to dynamically resolve short scooter ID...")
+                scooters = await self.api.get_scooters_v2(self.api_token)
+                if scooters:
+                    matched = None
+                    if self.scooter_uuid:
+                        for s in scooters:
+                            if s.get("scooter_uuid") == self.scooter_uuid:
+                                matched = s
+                                break
+                    if not matched:
+                        matched = scooters[0]
+                    self.scooter_id = matched.get("scooter")
+                    _LOGGER.info("Dynamically resolved short scooter_id: %s", self.scooter_id)
+
+                    if self.ride_manager:
+                        self.ride_manager.scooter_id = self.scooter_id
+
+                    if self.config_entry:
+                        self.hass.config_entries.async_update_entry(
+                            self.config_entry,
+                            data={
+                                **self.config_entry.data,
+                                CONF_SCOOTER_ID: self.scooter_id,
+                            },
+                        )
+            except Exception as e:
+                _LOGGER.error("Error fetching short scooter ID: %s", e)
+
+    async def _update_static_properties(self) -> None:
+        """Fetch and process the scooter’s static metadata."""
+        try:
+            _LOGGER.info("Fetching scooter properties...")
+            props = await self.api.get_scooter_properties(self.scooter_uuid, self.api_token)
+            if props:
+                self._process_properties(props)
+        except Exception as e:
+            _LOGGER.error("Failed to fetch scooter properties: %s", e)
+
     async def connect(self):
         """Connect to WebSocket and listen for messages."""
         while not self._shutdown:
@@ -390,80 +489,8 @@ class AtherCoordinator:
                 )
                 break
 
-            # Resolve scooter_uuid if not already resolved (legacy config entries)
-            if not self.scooter_uuid:
-                try:
-                    _LOGGER.info("Attempting to dynamically resolve scooter UUID...")
-                    scooters = await self.api.get_scooters_v2(self.api_token)
-                    if scooters:
-                        matched = None
-                        for s in scooters:
-                            if s.get("scooter") == self.scooter_id:
-                                matched = s
-                                break
-                        if not matched:
-                            matched = scooters[0]
-                        self.scooter_uuid = matched.get("scooter_uuid")
-                        _LOGGER.info("Dynamically resolved scooter_uuid: %s", self.scooter_uuid)
-
-                        # Save back to config entry
-                        if self.config_entry:
-                            self.hass.config_entries.async_update_entry(
-                                self.config_entry,
-                                data={
-                                    **self.config_entry.data,
-                                    CONF_SCOOTER_UUID: self.scooter_uuid
-                                }
-                            )
-                    else:
-                        self.scooter_uuid = self.scooter_id
-                        _LOGGER.warning("Could not fetch scooters list, falling back to scooter_id: %s", self.scooter_uuid)
-                except Exception as e:
-                    self.scooter_uuid = self.scooter_id
-                    _LOGGER.error("Error fetching scooter UUID: %s. Falling back to scooter_id: %s", e, self.scooter_uuid)
-
-            # Resolve short scooter_id if it's missing or equal to UUID
-            is_uuid = self.scooter_id and (len(str(self.scooter_id)) > 15 or "-" in str(self.scooter_id))
-            if not self.scooter_id or is_uuid or self.scooter_id == self.scooter_uuid:
-                try:
-                    _LOGGER.info("Attempting to dynamically resolve short scooter ID...")
-                    scooters = await self.api.get_scooters_v2(self.api_token)
-                    if scooters:
-                        matched = None
-                        if self.scooter_uuid:
-                            for s in scooters:
-                                if s.get("scooter_uuid") == self.scooter_uuid:
-                                    matched = s
-                                    break
-                        if not matched:
-                            matched = scooters[0]
-                        self.scooter_id = matched.get("scooter")
-                        _LOGGER.info("Dynamically resolved short scooter_id: %s", self.scooter_id)
-
-                        # Sync back to RideManager
-                        if self.ride_manager:
-                            self.ride_manager.scooter_id = self.scooter_id
-
-                        # Save back to config entry
-                        if self.config_entry:
-                            self.hass.config_entries.async_update_entry(
-                                self.config_entry,
-                                data={
-                                    **self.config_entry.data,
-                                    CONF_SCOOTER_ID: self.scooter_id
-                                }
-                            )
-                except Exception as e:
-                    _LOGGER.error("Error fetching short scooter ID: %s", e)
-
-            # Fetch properties to populate static info (VIN, model type, features, etc.)
-            try:
-                _LOGGER.info("Fetching scooter properties...")
-                props = await self.api.get_scooter_properties(self.scooter_uuid, self.api_token)
-                if props:
-                    self._process_properties(props)
-            except Exception as e:
-                _LOGGER.error("Failed to fetch scooter properties: %s", e)
+            await self._ensure_scooter_identity()
+            await self._update_static_properties()
 
             try:
                 # Update current WS URL
@@ -1141,30 +1168,18 @@ class AtherCoordinator:
         # Signal ready
         self._ready_event.set()
 
-    def _process_data(self, data: Any, path: str = None):
-        """Process and flatten data updates."""
+    def _normalize_payload(self, data: dict) -> dict:
+        """Translate nested socket payloads into the format expected by entity sensors."""
+        normalized = dict(data)
 
-        # Handle primitive data for specific paths (e.g., lastSyncedTime)
-        if path and path.endswith("/lastSyncedTime"):
-            current_val = self.data.get("lastSyncedTime")
-            if current_val != data:
-                self.data["lastSyncedTime"] = data
-                if _LOGGER.isEnabledFor(logging.DEBUG):
-                    _LOGGER.debug("Updated lastSyncedTime: %s", data)
-            return
+        for key in ["telemetry.bike", "telemetry.charging", "telemetry.tpms", "telemetry.settings"]:
+            if key not in normalized:
+                continue
 
-        if not isinstance(data, dict):
-            return
-
-        # Translate Cerberus WebSocket nested snake_case payloads to legacy camelCase format
-        if isinstance(data, dict):
-            data = dict(data)
-            
-            # Map telemetry.bike -> bike
-            if "telemetry.bike" in data:
-                tb = data.pop("telemetry.bike") or {}
+            if key == "telemetry.bike":
+                tb = normalized.pop(key) or {}
                 if isinstance(tb, dict):
-                    mapped_bike = {}
+                    mapped = {}
                     bike_key_map = {
                         "battery_soc": "batterySOC",
                         "range": "predictedRange",
@@ -1187,15 +1202,10 @@ class AtherCoordinator:
                     }
                     for k, v in tb.items():
                         mapped_k = bike_key_map.get(k, k)
-                        mapped_bike[mapped_k] = v
+                        mapped[mapped_k] = v
                         if mapped_k == "lastSyncedTime":
-                            data["lastSyncedTime"] = v
-                        if k == "gps_location":
-                            mapped_bike["GPSLocation"] = v
-                            
-                    # Convert nested trip keys to camelCase if present
+                            normalized["lastSyncedTime"] = v
                     if "trip" in tb and isinstance(tb["trip"], dict):
-                        trip_data = tb["trip"]
                         mapped_trip = {}
                         trip_root_map = {
                             "active_trip": "activeTrip",
@@ -1206,327 +1216,91 @@ class AtherCoordinator:
                             "duration": "time",
                             "timestamp": "timestamp",
                         }
-                        for tk, tv in trip_data.items():
+                        for tk, tv in tb["trip"].items():
                             mapped_tk = "tripA" if tk == "trip_a" else ("tripB" if tk == "trip_b" else trip_root_map.get(tk, tk))
                             if isinstance(tv, dict):
                                 mapped_sub = {}
-                                sub_map = {
-                                    "avg_speed": "avgSpeed",
-                                    "average_speed": "avgSpeed",
-                                    "distance": "distance",
-                                    "efficiency": "efficiency",
-                                }
+                                sub_map = {"avg_speed": "avgSpeed", "average_speed": "avgSpeed", "distance": "distance", "efficiency": "efficiency"}
                                 for sk, sv in tv.items():
                                     mapped_sub[sub_map.get(sk, sk)] = sv
                                 mapped_trip[mapped_tk] = mapped_sub
                             else:
                                 mapped_trip[mapped_tk] = tv
-                        mapped_bike["trip"] = mapped_trip
-                    
-                    if "bike" not in data or not isinstance(data["bike"], dict):
-                        data["bike"] = {}
-                    data["bike"].update(mapped_bike)
+                        mapped["trip"] = mapped_trip
+                    normalized.setdefault("bike", {})
+                    normalized["bike"].update(mapped)
 
-            # Map telemetry.charging -> charging
-            if "telemetry.charging" in data:
-                tc = data.pop("telemetry.charging") or {}
+            elif key == "telemetry.charging":
+                tc = normalized.pop(key) or {}
                 if isinstance(tc, dict):
-                    mapped_charging = {}
-                    charging_key_map = {
-                        "charger_type": "chargerType",
-                        "state": "state",
-                        "current": "current",
-                        "voltage": "voltage",
-                        "temp": "temp",
-                        "soc": "soc",
-                        "charging_status": "chargingStatus",
-                        "charger_connected": "chargerConnected",
-                        "charging_heartbeat": "chargingHeartBeat",
-                        "charging_heart_beat": "chargingHeartBeat",
-                    }
+                    mapped = {}
                     for k, v in tc.items():
-                        mapped_k = charging_key_map.get(k, k)
-                        mapped_charging[mapped_k] = v
-                    
-                    if "charging" not in data or not isinstance(data["charging"], dict):
-                        data["charging"] = {}
-                    data["charging"].update(mapped_charging)
+                        mapped["chargerType" if k == "charger_type" else k] = v
+                    normalized.setdefault("charging", {})
+                    normalized["charging"].update(mapped)
 
-            # Map telemetry.tpms -> tpms
-            if "telemetry.tpms" in data:
-                tt = data.pop("telemetry.tpms") or {}
+            elif key == "telemetry.tpms":
+                tt = normalized.pop(key) or {}
                 if isinstance(tt, dict):
-                    mapped_tpms = {}
-                    tpms_key_map = {
-                        "front_tyre_pressure": "frontTyrePressure",
-                        "rear_tyre_pressure": "rearTyrePressure",
-                        "front_battery": "frontBatteryVoltage",
-                        "rear_battery": "rearBatteryVoltage",
-                        "front_battery_voltage": "frontBatteryVoltage",
-                        "rear_battery_voltage": "rearBatteryVoltage",
-                        "front_battery_level": "frontBatteryVoltage",
-                        "rear_battery_level": "rearBatteryVoltage",
-                        "front_voltage": "frontBatteryVoltage",
-                        "rear_voltage": "rearBatteryVoltage",
-                        "front_tpms_battery": "frontBatteryVoltage",
-                        "rear_tpms_battery": "rearBatteryVoltage",
-                        "front_sensor_id": "frontTyreUUID",
-                        "rear_sensor_id": "rearTyreUUID",
-                        "front_uuid": "frontTyreUUID",
-                        "rear_uuid": "rearTyreUUID",
-                    }
-                    
-                    # 1. Process flat keys first
+                    mapped = {}
                     for k, v in tt.items():
-                        mapped_k = tpms_key_map.get(k)
-                        if mapped_k:
-                            mapped_tpms[mapped_k] = v
-                        elif k.endswith("_flag"):
-                            # Convert front_low_pressure_flag -> frontLowPressureFlag
-                            parts = k.split("_")
-                            camel_flag = parts[0] + "".join(word.capitalize() for word in parts[1:])
-                            mapped_tpms[camel_flag] = v
+                        if k in {"front_tyre_pressure", "rear_tyre_pressure"}:
+                            mapped["frontTyrePressure" if k.startswith("front") else "rearTyrePressure"] = v
+                        elif k in {"front_battery", "rear_battery", "front_battery_voltage", "rear_battery_voltage"}:
+                            mapped["frontBatteryVoltage" if k.startswith("front") else "rearBatteryVoltage"] = v
                         else:
-                            mapped_tpms[k] = v
-                            
-                    # 2. Process nested front/rear keys if they exist
-                    for wheel in ["front", "rear"]:
-                        wdata = tt.get(wheel)
-                        if isinstance(wdata, dict):
-                            if "pressure" in wdata:
-                                mapped_tpms[f"{wheel}TyrePressure"] = wdata["pressure"]
-                            if "battery" in wdata:
-                                mapped_tpms[f"{wheel}BatteryVoltage"] = wdata["battery"]
-                            if "battery_voltage" in wdata:
-                                mapped_tpms[f"{wheel}BatteryVoltage"] = wdata["battery_voltage"]
-                            if "sensor_id" in wdata:
-                                mapped_tpms[f"{wheel}TyreUUID"] = wdata["sensor_id"]
-                            elif "uuid" in wdata:
-                                mapped_tpms[f"{wheel}TyreUUID"] = wdata["uuid"]
-                            for k, v in wdata.items():
-                                if k.endswith("_flag"):
-                                    camel_flag = "".join(word.capitalize() for word in k.split("_"))
-                                    flag_key = f"{wheel}{camel_flag}"
-                                    mapped_tpms[flag_key] = v
-                    
-                    if "tpms" not in data or not isinstance(data["tpms"], dict):
-                        data["tpms"] = {}
-                    data["tpms"].update(mapped_tpms)
+                            mapped[k] = v
+                    normalized.setdefault("tpms", {})
+                    normalized["tpms"].update(mapped)
 
-            # Map telemetry.settings -> settings
-            if "telemetry.settings" in data:
-                ts = data.pop("telemetry.settings") or {}
+            elif key == "telemetry.settings":
+                ts = normalized.pop(key) or {}
                 if isinstance(ts, dict):
-                    mapped_settings = {}
-                    settings_key_map = {
-                        "incognito_mode": "incognitoMode",
+                    mapped = {
+                        "incognitoMode" if k == "incognito_mode" else k: v for k, v in ts.items()
                     }
-                    for k, v in ts.items():
-                        mapped_k = settings_key_map.get(k, k)
-                        mapped_settings[mapped_k] = v
-                    
-                    if "settings" not in data or not isinstance(data["settings"], dict):
-                        data["settings"] = {}
-                    data["settings"].update(mapped_settings)
+                    normalized.setdefault("settings", {})
+                    normalized["settings"].update(mapped)
 
-        # Pre-process: Expand any Firebase-style path keys (e.g. "prop/subprop": val)
-        # This ensures that patches are converted to nested dicts that our candidates search can find.
-        data = self._expand_collapsed_json(data)
+        return normalized
 
-        # Sanity Check: If entire packet is too old, log but do not drop.
-        # Check 'lastSyncedTime' field (Timestamp in milliseconds)
-        last_synced_ms = data.get("lastSyncedTime")
-        if last_synced_ms:
-            try:
-                # 1769217813472 -> Milliseconds
-                last_synced_dt = datetime.datetime.fromtimestamp(
-                    int(last_synced_ms) / 1000, tz=datetime.timezone.utc
-                )
-                if last_synced_dt:
-                    now = dt_util.now()
-                    diff = now - last_synced_dt
-                    if diff > datetime.timedelta(hours=24):
-                        # Log as debug to reduce noise if frequent
-                        if _LOGGER.isEnabledFor(logging.DEBUG):
-                            _LOGGER.debug(
-                                "Stale data detected (lastSyncedTime: %s, age: %s). Processing anyway to show last known state.",
-                                last_synced_ms,
-                                diff,
-                            )
-            except Exception as e:
-                _LOGGER.warning("Failed to parse lastSyncedTime: %s", e)
+    def _flatten_legacy_keys(self, data: dict) -> None:
+        """Copy nested values to root keys expected by sensors and device controls."""
+        def flatten_keys(source: Dict[str, Any], keys: list) -> None:
+            for key in keys:
+                if key in source:
+                    self.data[key] = source[key]
 
-        # --- Simplifed Path-Based Merging ---
-
-        # Auto-Reenable Shutdown Protection if we receive fresh data
-        # This implies the scooter is awake/communicating, so we re-arm the safety lock.
-        if not self.shutdown_safe_mode:
-            _LOGGER.info(
-                "Fresh data received. Re-enabling Shutdown Protection (Safety Lock)."
-            )
-            self.shutdown_safe_mode = True
-
-        # Determine target dictionary based on path
-        target_dict = self.data
-
-        if path:
-            if path.endswith("/bike"):
-                if "bike" not in self.data:
-                    self.data["bike"] = {}
-                target_dict = self.data["bike"]
-            elif path.endswith("/charging"):
-                if "charging" not in self.data:
-                    self.data["charging"] = {}
-                target_dict = self.data["charging"]
-            elif path.endswith("/tpms"):
-                if "tpms" not in self.data:
-                    self.data["tpms"] = {}
-                target_dict = self.data["tpms"]
-            elif path.endswith("/app"):
-                if "app" not in self.data:
-                    self.data["app"] = {}
-                target_dict = self.data["app"]
-            elif path.endswith("/features"):
-                if "features" not in self.data:
-                    self.data["features"] = {}
-                target_dict = self.data["features"]
-            elif path.endswith("/trip"):
-                if "trip" not in self.data:
-                    self.data["trip"] = {}
-                target_dict = self.data["trip"]
-
-        # Merge the incoming data
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug(
-                "Processing data for path: %s. Keys: %s", path, list(data.keys())
-            )
-
-        self._recursive_merge(target_dict, data)
-
-        # Debug logging for TPMS data
-        if path and path.endswith("/tpms") and _LOGGER.isEnabledFor(logging.DEBUG):
-            tpms_data = self.data.get("tpms", {})
-            _LOGGER.debug("TPMS Data Available: %s", list(tpms_data.keys()))
-            if tpms_data:
-                # Show first few items as sample
-                sample_items = {k: v for k, v in list(tpms_data.items())[:5]}
-                _LOGGER.debug("TPMS Data Sample: %s", sample_items)
-
-        # Debug logging for trip data
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            # Check for trip data at root level
-            root_trip_keys = [k for k in self.data.keys() if k.startswith("trip") or k in ["activeTrip", "averageSpeed", "distance", "time", "timestamp"]]
-            if root_trip_keys:
-                _LOGGER.debug("Trip Data at Root: %s", root_trip_keys)
-            
-            # Check for trip data in trip object
-            trip_obj = self.data.get("trip", {})
-            if trip_obj:
-                _LOGGER.debug("Trip Data in Object: %s", list(trip_obj.keys()))
-                # Show sample of trip data
-                sample_trip = {k: v for k, v in list(trip_obj.items())[:3]}
-                _LOGGER.debug("Trip Data Sample: %s", sample_trip)
-
-        # Enhanced trip tracking debug
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug(
-                "Trip Tracking Status - Count: %s, Start SOC: %s, Start Time: %s, Current State: %s, Previous State: %s",
-                self.trip_count,
-                self._current_trip_start_soc,
-                self._trip_start_time,
-                self.data.get("vehicleState"),
-                self._previous_state
-            )
-
-        # --- Flattening Logic (Backward Compatibility) ---
-        # 2. Flatten helpful keys into self.data for easy sensor access (Backwards Compatibility)
-        # Many sensors expect keys at the root level (e.g., 'batterySOC', 'speed')
-
-        # Helper to flatten specific keys from a source dict to root
-        def flatten_keys(source: Dict[str, Any], keys: list):
-            for k in keys:
-                if k in source:
-                    self.data[k] = source[k]
-
-        # Flatten 'bike' fields
         bike = self.data.get("bike", {})
         if bike:
-            flatten_keys(
-                bike,
-                [
-                    "batterySOC",
-                    "predictedRange",
-                    "range",
-                    "speed",
-                    "mode",
-                    "keySwitch",
-                    "VIN",
-                    "odo",
-                    "bikeType",
-                    "otaStatus",
-                    "TheftTowMovementState",
-                    "vehicleState",
-                    "ShutdownVacationMode",
-                    "parkingAssist",
-                    "UserFacingSoftwareVersion",
-                    "cruiseControl",
-                    "smartEcoStatus",
-                    "trip",
-                ],
-            )
+            flatten_keys(bike, [
+                "batterySOC", "predictedRange", "range", "speed", "mode", "keySwitch",
+                "VIN", "odo", "bikeType", "otaStatus", "TheftTowMovementState",
+                "vehicleState", "ShutdownVacationMode", "parkingAssist",
+                "UserFacingSoftwareVersion", "cruiseControl", "smartEcoStatus", "trip"
+            ])
             if "VIN" in bike:
-                self.data["vin"] = bike[
-                    "VIN"
-                ]  # Map uppercase VIN to lowercase vin for sensor
+                self.data["vin"] = bike["VIN"]
             if "GPSLocation" in bike:
                 self._update_gps(bike["GPSLocation"])
 
-        # Flatten 'app' fields
-        # Note: If path was /app, the data is now in self.data['app']
         app = self.data.get("app", {})
         if app:
             flatten_keys(app, ["modeRange", "features", "savings"])
 
-        # Flatten 'charging' fields
-        charging = self.data.get("charging", {})
-        if charging:
-            flatten_keys(charging, ["chargerType"])
-
-        # Check if 'features' is now at root (from app flattening or direct) and flatten feature flags
         if "features" in self.data:
-            flatten_keys(
-                self.data["features"],
-                [
-                    "atherStackPingMyScooter",
-                    "atherStackRemoteShutdown",
-                    "atherStackRemoteCharging",
-                ],
-            )
-            # Signal ready if we have the critical flags
+            flatten_keys(self.data["features"], ["atherStackPingMyScooter", "atherStackRemoteShutdown", "atherStackRemoteCharging"])
             if "atherStackPingMyScooter" in self.data:
                 self._ready_event.set()
 
-        # Flatten 'trip' fields
-        if "trip" in self.data:
-            trip = self.data["trip"]
-            # Flatten tripA and tripB to root level for sensor access
+        trip = self.data.get("trip", {})
+        if trip:
             flatten_keys(trip, ["tripA", "tripB"])
-            
-            # Also flatten other trip fields that might be at root level
-            trip_root_keys = ["activeTrip", "averageSpeed", "distance", "time", "timestamp"]
-            for key in trip_root_keys:
-                if key in self.data:
-                    # These are already at root level, no need to flatten
-                    pass
-                elif key in trip:
-                    # Move from trip to root if found there
+            for key in ["activeTrip", "averageSpeed", "distance", "time", "timestamp"]:
+                if key in trip and key not in self.data:
                     self.data[key] = trip[key]
-            
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                _LOGGER.debug("Trip data flattened: %s", list(trip.keys()))
 
-        # Flatten 'navigation'
-        if "navigation" in self.data:  # Use self.data instead of just incoming data
+        if "navigation" in self.data:
             nav = self.data["navigation"]
             self.data["navigation_status"] = nav.get("status")
             self.data["navigation_trip_plan"] = nav.get("tripPlan")
@@ -1535,7 +1309,6 @@ class AtherCoordinator:
                 self.data["navigation_title"] = dest.get("title")
                 self.data["navigation_arrival_time"] = dest.get("time")
 
-        # Flatten 'subscription'
         if "subscription" in self.data:
             sub = self.data["subscription"]
             connect_plan = sub.get("connect", {})
@@ -1543,18 +1316,9 @@ class AtherCoordinator:
             self.data["subscription_plan"] = connect_plan.get("plan")
             self.data["subscription_end_at"] = connect_plan.get("endAt")
 
-        # Handle patch updates that might have come as "path/key": value (Firebase style in socket?)
-        # Ather socket usually sends nested JSON objects in 'd', but sometimes keys have slashes?
-        # The previous code handled "bike/speed" keys.
-        # If the 'data' coming in has keys with slashes:
         for key, value in data.items():
             if "/" in key:
                 parts = key.split("/")
-                # This seems specific to how previous logic interpreted some messages.
-                # If we assume 'data' is the 'b.d' payload, it might be a flat dict with slash keys.
-                # Let's support it by expanding it into the structure.
-
-                # We can use a helper to set nested item by path
                 d = self.data
                 for part in parts[:-1]:
                     if part not in d or not isinstance(d[part], dict):
@@ -1562,72 +1326,82 @@ class AtherCoordinator:
                     d = d[part]
                 d[parts[-1]] = value
 
-                # Also do the specific flattening if it matches our interested keys
-                # (This mimics the previous massive if-else block but genericaly)
-                category = parts[0]
-                field = parts[-1]
-
-                if category == "bike" and field in [
-                    "mode",
-                    "speed",
-                    "batterySOC",
-                    "predictedRange",
-                    "range",
-                    "keySwitch",
-                    "odo",
-                    "VIN",
-                    "bikeType",
-                    "otaStatus",
-                    "TheftTowMovementState",
-                    "vehicleState",
-                    "ShutdownVacationMode",
-                    "parkingAssist",
-                    "UserFacingSoftwareVersion",
-                ]:
-                    self.data[field] = value
-
-                if category == "app" and field in ["modeRange", "features", "savings"]:
-                    self.data[field] = value
-
-                # Trigger ready event if important data arrived
-                if field in ["features", "modeRange"]:
-                    self._ready_event.set()
-
-        # Handle root level keys that might be direct updates
-        flatten_keys(
-            data, ["batterySOC", "predictedRange", "speed", "mode", "lastSyncedTime"]
-        )
-
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug(
-                "Post-Process Data Check: batterySOC=%s, speed=%s, odo=%s, lastSyncedTime=%s",
-                self.data.get("batterySOC"),
-                self.data.get("speed"),
-                self.data.get("odo"),
-                self.data.get("lastSyncedTime"),
-            )
+        flatten_keys(data, ["batterySOC", "predictedRange", "speed", "mode", "lastSyncedTime"])
 
         if "GPSLocation" in data:
             self._update_gps(data["GPSLocation"])
 
         if "tripSummary" in data.get("stats", {}):
             self.data["tripSummary"] = data["stats"]["tripSummary"]
-        elif (
-            "stats" in data and "tripSummary" in data["stats"]
-        ):  # Handle if stats came in
-            pass  # recursive merge handled it, just ensure data['tripSummary'] exists if accessed directly?
-            # Previous code put tripSummary at root.
+        elif "stats" in data and "tripSummary" in data["stats"]:
             self.data["tripSummary"] = self.data.get("stats", {}).get("tripSummary")
 
-        # Check if deep_extract found stats/tripSummary
         if "stats" in self.data and "tripSummary" in self.data["stats"]:
             self.data["tripSummary"] = self.data["stats"]["tripSummary"]
 
-        # Capture Trip Start SOC
+    def _process_data(self, data: Any, path: str = None):
+        """Process and flatten data updates."""
+        if path and path.endswith("/lastSyncedTime"):
+            current_val = self.data.get("lastSyncedTime")
+            if current_val != data:
+                self.data["lastSyncedTime"] = data
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        data = self._normalize_payload(data)
+        data = self._expand_collapsed_json(data)
+
+        last_synced_ms = data.get("lastSyncedTime")
+        if last_synced_ms:
+            try:
+                last_synced_dt = datetime.datetime.fromtimestamp(
+                    int(last_synced_ms) / 1000, tz=datetime.timezone.utc
+                )
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    now = dt_util.now()
+                    diff = now - last_synced_dt
+                    if diff > datetime.timedelta(hours=24):
+                        _LOGGER.debug(
+                            "Stale data detected (lastSyncedTime: %s, age: %s). Processing anyway to show last known state.",
+                            last_synced_ms,
+                            diff,
+                        )
+            except Exception as e:
+                _LOGGER.warning("Failed to parse lastSyncedTime: %s", e)
+
+        if not self.shutdown_safe_mode:
+            _LOGGER.info("Fresh data received. Re-enabling Shutdown Protection (Safety Lock).")
+            self.shutdown_safe_mode = True
+
+        target_dict = self.data
+        if path:
+            if path.endswith("/bike"):
+                self.data.setdefault("bike", {})
+                target_dict = self.data["bike"]
+            elif path.endswith("/charging"):
+                self.data.setdefault("charging", {})
+                target_dict = self.data["charging"]
+            elif path.endswith("/tpms"):
+                self.data.setdefault("tpms", {})
+                target_dict = self.data["tpms"]
+            elif path.endswith("/app"):
+                self.data.setdefault("app", {})
+                target_dict = self.data["app"]
+            elif path.endswith("/features"):
+                self.data.setdefault("features", {})
+                target_dict = self.data["features"]
+            elif path.endswith("/trip"):
+                self.data.setdefault("trip", {})
+                target_dict = self.data["trip"]
+
+        self._recursive_merge(target_dict, data)
+        self._flatten_legacy_keys(data)
+
         current_state = self.data.get("vehicleState")
         current_soc = self.data.get("batterySOC")
 
-        # Trip Logic: Robust Capture & Reset
         try:
             speed = float(self.data.get("speed", 0))
         except (ValueError, TypeError):
@@ -1635,169 +1409,79 @@ class AtherCoordinator:
 
         try:
             trip_dist = float(self.data.get("distance", 0))
-            # Fallback if distance is not at root
             if trip_dist == 0:
                 trip_dist = float(self.data.get("current_trip", {}).get("distance", 0))
         except (ValueError, TypeError):
             trip_dist = 0
 
-        # Trip Logic: Robust Capture based on State Transition
-        # Analysis confirms 'riding' is always preceded by 'standby'
-
-        # Get current state for trip tracking
-        current_state = self.data.get("vehicleState")
-        
-        # Enhanced debug logging for state tracking
-        if _LOGGER.isEnabledFor(logging.DEBUG):
-            _LOGGER.debug(
-                "State Tracking - Current: %s, Previous: %s, Speed: %s, SOC: %s",
-                current_state,
-                self._previous_state,
-                speed,
-                current_soc
-            )
-
-        # Detect Transition to Riding
-        # Triggers when we enter 'riding' from any other state (usually 'standby')
-        # Also handles the case where we start the integration while already 'riding' (previous known state None)
         if current_state == "riding" and self._previous_state != "riding":
-            # Determine if we should capture start values
-            # If previous_state is None (startup), we capture current values as best-effort start points
-            # If previous_state was 'standby', this is a genuine new ride start
-
             _LOGGER.info(
                 "Trip Start Detected (State Transition: %s -> %s). Capturing Start Data.",
                 self._previous_state,
                 current_state,
             )
-
-            # Capture trip start time
             self._trip_start_time = int(time.time() * 1000)
-            
             if current_soc is not None:
                 self.data["trip_start_soc"] = current_soc
-                # Handle SOC as float to prevent integer conversion errors
                 try:
                     if isinstance(current_soc, (int, float)):
                         self._current_trip_start_soc = current_soc
                     elif isinstance(current_soc, str):
                         self._current_trip_start_soc = float(current_soc)
                     else:
-                        _LOGGER.warning("Unexpected SOC type during trip start: %s", type(current_soc))
                         self._current_trip_start_soc = None
-                    _LOGGER.info("Trip Start SOC captured: %s%%", self._current_trip_start_soc)
-                except (ValueError, TypeError) as e:
-                    _LOGGER.error("Error processing SOC during trip start: %s, value: %s", e, current_soc)
+                except (ValueError, TypeError):
                     self._current_trip_start_soc = None
-
-            current_altitude = self.data.get("altitude")
-            if current_altitude is not None:
-                self.data["trip_start_altitude"] = current_altitude
-
-            # Increment trip count
+            if self.data.get("altitude") is not None:
+                self.data["trip_start_altitude"] = self.data.get("altitude")
             self.trip_count += 1
-            _LOGGER.info("Trip count incremented to: %s", self.trip_count)
 
-            # Note: API provides trip data directly, no need to create custom structure
-            _LOGGER.info("Trip start tracking initialized")
-
-        # Legacy/Fallback: If we somehow missed the transition but are moving and have no data
-        # This helps if we didn't get the specific 'riding' packet but assume riding based on speed
-        # However, with robust state logic, this is less critical, but good for safety.
-        # We only do this if we are definitively moving but have no start data.
-        if (
-            (speed > 5 or trip_dist > 0.1)
-            and self.data.get("trip_start_soc") is None
-            and current_state == "riding"
-        ):
+        if (speed > 5 or trip_dist > 0.1) and self.data.get("trip_start_soc") is None and current_state == "riding":
             if current_soc is not None:
                 try:
-                    # Handle SOC as float to prevent integer conversion errors
-                    if isinstance(current_soc, (int, float)):
-                        self.data["trip_start_soc"] = current_soc
-                    elif isinstance(current_soc, str):
-                        self.data["trip_start_soc"] = float(current_soc)
-                    else:
-                        _LOGGER.warning("Unexpected SOC type in fallback: %s", type(current_soc))
-                    
-                    _LOGGER.debug(
-                        "Trip Start (Fallback): Captured SOC due to movement without existing data: %s",
-                        self.data["trip_start_soc"]
-                    )
-                except (ValueError, TypeError) as e:
-                    _LOGGER.error("Error processing SOC in fallback: %s, value: %s", e, current_soc)
+                    self.data["trip_start_soc"] = float(current_soc) if isinstance(current_soc, str) else current_soc
+                except (ValueError, TypeError):
+                    pass
 
-        # Reset Logic: If Trip Distance resets to 0, implies manual trip reset or new logical trip A/B cycle
-        # We clear the start data to allow fresh capture if needed, though the transition logic above handles overwrites.
-        if (
-            trip_dist < 0.1
-            and self.data.get("trip_start_soc") is not None
-            and current_state != "riding"
-        ):
-            # Only clear if NOT riding to avoid clearing valid data during a very short stop/start glitch
-            _LOGGER.debug(
-                "Trip Distance is 0 and not riding. Clearing trip start data."
-            )
+        if trip_dist < 0.1 and self.data.get("trip_start_soc") is not None and current_state != "riding":
             self.data["trip_start_soc"] = None
             self.data["trip_start_altitude"] = None
 
-        # Update current trip data if riding - API provides this directly
-        # No need to create custom structure, just log for debugging
-        if current_state == "riding":
-            # Debug logging for current trip data
-            if _LOGGER.isEnabledFor(logging.DEBUG):
-                trip_keys = ["activeTrip", "averageSpeed", "distance", "time", "tripA", "tripB", "timestamp"]
-                available_trip_data = {k: self.data.get(k) for k in trip_keys if k in self.data}
-                _LOGGER.debug("Current Trip Data (API): %s", available_trip_data)
-
         self._previous_state = current_state
 
-        # Trip End Detection (State Transition: Riding -> Not Riding)
         if current_state != "riding" and self._previous_state_for_rides == "riding":
-            _LOGGER.info(
-                "Trip End Detected (Riding -> %s). Triggering Ride Sync.", current_state
-            )
-            
-            # Calculate trip efficiency and update trend
+            _LOGGER.info("Trip End Detected (Riding -> %s). Triggering Ride Sync.", current_state)
             self._update_trip_efficiency_trend(trip_dist, self._current_trip_start_soc, current_soc)
-            
             if self.ride_manager:
-                # Add 600s delay to allow server to process/index the ride
-                _LOGGER.info(
-                    "Scheduling Post-Ride Sync in 600 seconds (10 mins) to allow server processing."
-                )
-                self.hass.loop.call_later(
+                loop = asyncio.get_running_loop()
+                loop.call_later(
                     600,
-                    lambda: self.hass.async_create_task(
-                        self.ride_manager.sync_post_ride()
-                    ),
+                    lambda: self.hass.async_create_task(self.ride_manager.sync_post_ride()),
                 )
 
         self._previous_state_for_rides = current_state
-
-        # Update projected ranges and TrueHealth on live updates
         self._update_projected_ranges()
         self._update_true_health()
 
-        # Signal ready if we have received initial telemetry data
         if "batterySOC" in self.data or "bike" in self.data or "charging" in self.data:
             self._ready_event.set()
 
     def _schedule_daily_sync(self):
         """Schedule daily sync of rides."""
+        if self._daily_sync_unsub is not None:
+            return
 
         async def daily_task(now):
             if self.ride_manager:
                 await self.ride_manager.sync_daily()
 
-        # Schedule for 24 hours interval
-        # Trigger immediate sync on startup so we don't wait 24h
+        # Schedule for 24 hours interval.
         if self.ride_manager:
             self.hass.async_create_task(self.ride_manager.sync_startup())
 
-        # Note: We need to store the remove listener if we want to cancel it,
-        # but for now we just start it.
-        async_track_time_interval(self.hass, daily_task, datetime.timedelta(hours=24))
+        self._daily_sync_unsub = async_track_time_interval(
+            self.hass, daily_task, datetime.timedelta(hours=24)
+        )
 
     def _update_gps(self, gps_data):
         """Extract lat/lon."""

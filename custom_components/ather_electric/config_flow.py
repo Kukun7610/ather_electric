@@ -28,6 +28,7 @@ from .const import (
     CONF_VIN,
     CONF_MODEL,
 )
+from .helpers import normalize_api_token
 from homeassistant.core import callback
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 class AtherConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Ather Electric."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self):
         """Initialize flow."""
@@ -179,13 +180,15 @@ class AtherConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(vin)
         self._abort_if_unique_id_configured()
 
+        canonical_token = normalize_api_token({"api_token": self.api_token, "ather_token": self.api_token}) or self.api_token
+
         return self.async_create_entry(
             title=f"Ather {model} ({vin})",
             data={
-                CONF_SCOOTER_ID: scooter_id, # Stores the short ID
+                CONF_SCOOTER_ID: scooter_id,  # Stores the short ID
                 CONF_SCOOTER_UUID: scooter_uuid,
-                CONF_ATHER_TOKEN: self.api_token, # store token
-                "api_token": self.api_token, # Keep for backward compat
+                CONF_ATHER_TOKEN: canonical_token,
+                "api_token": canonical_token,  # Keep for backward compat
                 CONF_VIN: vin,
                 CONF_MODEL: model,
                 CONF_FIREBASE_TOKEN: self.firebase_token or "",
@@ -260,6 +263,7 @@ class AtherConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if tokens:
                 self.api_token = tokens.get("token")
                 self.firebase_token = tokens.get("firebase_token")
+                canonical_token = normalize_api_token({"api_token": self.api_token, "ather_token": self.api_token}) or self.api_token
 
                 # Fetch dynamic details to update just in case
                 scooter_uuid = self.reauth_entry.data.get(CONF_SCOOTER_UUID) if self.reauth_entry else None
@@ -298,8 +302,8 @@ class AtherConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_VIN: vin,
                             CONF_MODEL: model,
                             CONF_FIREBASE_TOKEN: self.firebase_token or "",
-                            "api_token": self.api_token,
-                            CONF_ATHER_TOKEN: self.api_token,
+                            "api_token": canonical_token,
+                            CONF_ATHER_TOKEN: canonical_token,
                             CONF_MOBILE_NO: self.mobile_no,
                         },
                     )
