@@ -1125,6 +1125,9 @@ class AtherBatterySoHSensor(AtherTrueHealthSensor):
             "degradation_percent": bat.get("degradation_pct"),
             "cell_balance_status": bat.get("cell_balance"),
             "health_status": bat.get("status"),
+            "pack_voltage": bat.get("pack_voltage"),
+            "avg_cell_voltage": bat.get("avg_cell_voltage"),
+            "max_drift_mv": bat.get("max_drift_mv"),
         }
 
 
@@ -1326,6 +1329,7 @@ class AtherResaleValuationSensor(AtherTrueHealthSensor):
             .get("resale", {})
         )
         return {
+            "formatted_value": resale.get("formatted_value"),
             "health_bonus_inr": resale.get("health_bonus_inr"),
             "certified_by": resale.get("certified_by"),
         }
